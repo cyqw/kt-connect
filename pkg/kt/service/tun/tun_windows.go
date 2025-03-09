@@ -39,53 +39,15 @@ func (s *Cli) SetRoute(ipRange []string, excludeIpRange []string) error {
 	if opt.Store.Ipv6Cluster == true {
 		anyRouteOk, lastErr = s.setIPv6Route(ipRange, excludeIpRange)
 	} else {
-		for i, r := range ipRange {
-			log.Info().Msgf("Adding route to %s", r)
-			_, mask, err := toIpAndMask(r)
-			tunIp := strings.Split(r, "/")[0]
-			if err != nil {
-				return AllRouteFailError{err}
-			}
-			if i == 0 {
-				// run command: netsh interface ipv4 set address KtConnectTunnel static 172.20.0.1 255.255.0.0
-				_, _, err = util.RunAndWait(exec.Command("netsh",
-					"interface",
-					"ipv4",
-					"set",
-					"address",
-					s.GetName(),
-					"static",
-					tunIp,
-					mask,
-				))
-			} else {
-				// run command: netsh interface ipv4 add address KtConnectTunnel 172.21.0.1 255.255.0.0
-				_, _, err = util.RunAndWait(exec.Command("netsh",
-					"interface",
-					"ipv4",
-					"add",
-					"address",
-					s.GetName(),
-					tunIp,
-					mask,
-				))
-			}
-			if err != nil {
-				log.Warn().Msgf("Failed to add ip addr %s to tun device", tunIp)
-				lastErr = err
-				continue
-			} else {
-				anyRouteOk = true
-			}
+		for _, r := range ipRange {
 			// run command: netsh interface ipv4 add route 172.20.0.0/16 KtConnectTunnel 172.20.0.0
-			_, _, err = util.RunAndWait(exec.Command("netsh",
+			_, _, err := util.RunAndWait(exec.Command("netsh",
 				"interface",
 				"ipv4",
 				"add",
 				"route",
 				r,
 				s.GetName(),
-				tunIp,
 			))
 			if err != nil {
 				log.Warn().Msgf("Failed to set route %s to tun device", r)
@@ -204,23 +166,7 @@ func (s *Cli) RestoreRoute() error {
 		if util.Contains(otherIdx, r.InterfaceIndex) {
 			continue
 		}
-		// run command: netsh interface ipv4 delete route store=persistent 172.20.0.0/16 29 172.20.0.0
-		_, _, err = util.RunAndWait(exec.Command("netsh",
-			"interface",
-			"ipv4",
-			"delete",
-			"route",
-			"store=persistent",
-			r.TargetRange,
-			r.InterfaceIndex,
-			r.InterfaceName,
-		))
-		if err != nil {
-			log.Warn().Msgf("Failed to clean route to %s", r.TargetRange)
-			lastErr = err
-		} else {
-			log.Debug().Msgf("Drop route to %s", r.TargetRange)
-		}
+
 	}
 	return lastErr
 }
