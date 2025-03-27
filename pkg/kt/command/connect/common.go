@@ -73,13 +73,12 @@ func getDnsOrder(dnsMode string) []string {
 func watchServicesAndPods(namespace string, svcToIp map[string]string, headlessPods []string, shortDomainOnly bool) {
 	setupTime := time.Now().Unix()
 	var signal atomic.Bool
+	signal.Store(false)
 	go func() {
 		for {
-			time.Sleep(5 * time.Second)
+			time.Sleep(time.Second * 10)
 			if signal.CompareAndSwap(true, false) {
-				_ = dns.DumpHosts(svcToIp, namespace)
-				_ = tun.Ins().RestoreRoute()
-				_ = setupTunRoute()
+				updateHostInfo(svcToIp, namespace)
 			}
 		}
 	}()
@@ -100,6 +99,12 @@ func watchServicesAndPods(namespace string, svcToIp map[string]string, headlessP
 			signal.Store(true)
 		}
 	}, nil)
+}
+
+func updateHostInfo(svcToIp map[string]string, namespace string) {
+	_ = dns.DumpHosts(svcToIp, namespace)
+	_ = tun.Ins().RestoreRoute()
+	_ = setupTunRoute()
 }
 
 func dumpToHost(targetNamespaces string) error {
