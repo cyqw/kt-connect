@@ -166,7 +166,22 @@ func (s *Cli) RestoreRoute() error {
 		if util.Contains(otherIdx, r.InterfaceIndex) {
 			continue
 		}
-
+		// run command: netsh interface ipv4 delete route store=persistent 172.20.0.0/16 29 172.20.0.0
+		_, _, err = util.RunAndWait(exec.Command("netsh",
+			"interface",
+			"ipv4",
+			"delete",
+			"route",
+			"store=persistent",
+			r.TargetRange,
+			r.InterfaceName,
+		))
+		if err != nil {
+			log.Warn().Msgf("Failed to clean route to %s", r.TargetRange)
+			lastErr = err
+		} else {
+			log.Debug().Msgf("Drop route to %s", r.TargetRange)
+		}
 	}
 	return lastErr
 }

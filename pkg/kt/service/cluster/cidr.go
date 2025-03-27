@@ -21,6 +21,13 @@ func (k *Kubernetes) ClusterCidr(namespace string) ([]string, []string) {
 	for _, ip := range ips {
 		cidr = append(cidr, ip+"/32")
 	}
+	if !opt.Get().Connect.DisablePodIp {
+		ips = getPodIps(k.Clientset, namespace)
+		log.Debug().Msgf("Found %d IPs", len(ips))
+		for _, ip := range ips {
+			cidr = append(cidr, ip+"/32")
+		}
+	}
 	return cidr, make([]string, 0)
 
 }

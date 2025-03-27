@@ -6,11 +6,13 @@ import (
 	opt "github.com/alibaba/kt-connect/pkg/kt/command/options"
 	"github.com/alibaba/kt-connect/pkg/kt/service/cluster"
 	"github.com/alibaba/kt-connect/pkg/kt/service/dns"
+	"github.com/alibaba/kt-connect/pkg/kt/service/tun"
 	"github.com/alibaba/kt-connect/pkg/kt/transmission"
 	"github.com/alibaba/kt-connect/pkg/kt/util"
 	"github.com/rs/zerolog/log"
 	coreV1 "k8s.io/api/core/v1"
 	"strings"
+	"sync/atomic"
 	"time"
 )
 
@@ -19,7 +21,7 @@ func setupDns(shadowPodName, shadowPodIp string) error {
 		log.Info().Msgf("Setting up dns in hosts mode")
 		dump2HostsNamespaces := ""
 		pos := len(util.DnsModeHosts)
-		if len(opt.Get().Connect.DnsMode) > pos + 1 && opt.Get().Connect.DnsMode[pos:pos+1] == ":" {
+		if len(opt.Get().Connect.DnsMode) > pos+1 && opt.Get().Connect.DnsMode[pos:pos+1] == ":" {
 			dump2HostsNamespaces = opt.Get().Connect.DnsMode[pos+1:]
 		}
 		if err := dumpToHost(dump2HostsNamespaces); err != nil {
@@ -62,32 +64,40 @@ func setupDns(shadowPodName, shadowPodIp string) error {
 }
 
 func getDnsOrder(dnsMode string) []string {
-	if ! strings.Contains(dnsMode, ":") {
-		return []string{ util.DnsOrderCluster, util.DnsOrderUpstream }
+	if !strings.Contains(dnsMode, ":") {
+		return []string{util.DnsOrderCluster, util.DnsOrderUpstream}
 	}
 	return strings.Split(strings.SplitN(dnsMode, ":", 2)[1], ",")
 }
 
 func watchServicesAndPods(namespace string, svcToIp map[string]string, headlessPods []string, shortDomainOnly bool) {
 	setupTime := time.Now().Unix()
+	var signal atomic.Bool
+	go func() {
+		for {
+			time.Sleep(5 * time.Second)
+			if signal.CompareAndSwap(true, false) {
+				_ = dns.DumpHosts(svcToIp, namespace)
+				_ = tun.Ins().RestoreRoute()
+				_ = setupTunRoute()
+			}
+		}
+	}()
 	go cluster.Ins().WatchService("", namespace,
 		func(svc *coreV1.Service) {
 			// ignore add service event during watch setup
-			if time.Now().Unix() - setupTime > 3 {
-				svcToIp, headlessPods = getServiceHosts(namespace, shortDomainOnly)
-				_ = dns.DumpHosts(svcToIp, namespace)
+			if time.Now().Unix()-setupTime > 3 {
+				signal.Store(true)
 			}
 		},
 		func(svc *coreV1.Service) {
-			svcToIp, headlessPods = getServiceHosts(namespace, shortDomainOnly)
-			_ = dns.DumpHosts(svcToIp, namespace)
+			signal.Store(true)
 		}, nil)
 	go cluster.Ins().WatchPod("", namespace, nil, func(pod *coreV1.Pod) {
 		if util.Contains(headlessPods, pod.Name) {
 			// it may take some time for new pod get assign an ip
 			time.Sleep(5 * time.Second)
-			svcToIp, headlessPods = getServiceHosts(namespace, shortDomainOnly)
-			_ = dns.DumpHosts(svcToIp, namespace)
+			signal.Store(true)
 		}
 	}, nil)
 }
@@ -186,7 +196,7 @@ func getEnvs() map[string]string {
 
 func getLabels() map[string]string {
 	labels := map[string]string{
-		util.KtRole:    util.RoleConnectShadow,
+		util.KtRole: util.RoleConnectShadow,
 	}
 	if opt.Get().Global.UseShadowDeployment {
 		labels[util.KtTarget] = util.RandomString(20)
