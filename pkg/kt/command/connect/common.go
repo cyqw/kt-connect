@@ -42,20 +42,6 @@ func setupDns(shadowPodName, shadowPodIp string) error {
 		if _, err := transmission.SetupPortForwardToLocal(shadowPodName, common.StandardDnsPort, forwardedPodPort); err != nil {
 			return err
 		}
-
-		dnsPort := util.AlternativeDnsPort
-		if util.IsWindows() {
-			dnsPort = common.StandardDnsPort
-		} else if util.IsMacos() {
-			dnsPort = opt.Get().Connect.DnsPort
-		}
-		// must set up name server before change dns config
-		// otherwise the upstream name server address will be incorrect in linux
-		if err := dns.SetupLocalDns(forwardedPodPort, dnsPort, getDnsOrder(opt.Get().Connect.DnsMode)); err != nil {
-			log.Error().Err(err).Msgf("Failed to setup local dns server")
-			return err
-		}
-		return dns.SetNameServer(fmt.Sprintf("%s:%d", common.Localhost, dnsPort))
 	} else {
 		return fmt.Errorf("invalid dns mode: '%s', supportted mode are %s, %s, %s", opt.Get().Connect.DnsMode,
 			util.DnsModeLocalDns, util.DnsModePodDns, util.DnsModeHosts)
@@ -71,15 +57,14 @@ func getDnsOrder(dnsMode string) []string {
 }
 
 func watchServicesAndPods(namespace string, svcToIp map[string]string, headlessPods []string, shortDomainOnly bool) {
+	var foundChange atomic.Bool
+	foundChange.Store(false)
 	setupTime := time.Now().Unix()
-	var signal atomic.Bool
 	go func() {
 		for {
-			time.Sleep(5 * time.Second)
-			if signal.CompareAndSwap(true, false) {
-				_ = dns.DumpHosts(svcToIp, namespace)
-				_ = tun.Ins().RestoreRoute()
-				_ = setupTunRoute()
+			time.Sleep(time.Second * 10)
+			if foundChange.CompareAndSwap(true, false) {
+				updateHostInfo(svcToIp, namespace)
 			}
 		}
 	}()
@@ -87,19 +72,27 @@ func watchServicesAndPods(namespace string, svcToIp map[string]string, headlessP
 		func(svc *coreV1.Service) {
 			// ignore add service event during watch setup
 			if time.Now().Unix()-setupTime > 3 {
-				signal.Store(true)
+				foundChange.Store(true)
 			}
 		},
 		func(svc *coreV1.Service) {
-			signal.Store(true)
+			foundChange.Store(true)
 		}, nil)
 	go cluster.Ins().WatchPod("", namespace, nil, func(pod *coreV1.Pod) {
 		if util.Contains(headlessPods, pod.Name) {
 			// it may take some time for new pod get assign an ip
 			time.Sleep(5 * time.Second)
-			signal.Store(true)
+			foundChange.Store(true)
 		}
+		var hosts, _ = getServiceHosts(namespace, shortDomainOnly)
+		updateHostInfo(hosts, namespace)
 	}, nil)
+}
+
+func updateHostInfo(svcToIp map[string]string, namespace string) {
+	_ = dns.DumpHosts(svcToIp, namespace)
+	_ = tun.Ins().RestoreRoute()
+	_ = setupTunRoute()
 }
 
 func dumpToHost(targetNamespaces string) error {

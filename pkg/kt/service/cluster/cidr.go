@@ -16,10 +16,21 @@ import (
 func (k *Kubernetes) ClusterCidr(namespace string) ([]string, []string) {
 	ips := getServiceIps(k.Clientset, namespace)
 	log.Debug().Msgf("Found %d IPs", len(ips))
+	ipmap := make(map[string]string)
 
-	cidr := make([]string, 0)
 	for _, ip := range ips {
-		cidr = append(cidr, ip+"/32")
+		ipmap[ip+"/32"] = "0.0.0.0/0"
+	}
+	if !opt.Get().Connect.DisablePodIp {
+		ips = getPodIps(k.Clientset, namespace)
+		log.Debug().Msgf("Found %d IPs", len(ips))
+		for _, ip := range ips {
+			ipmap[ip+"/32"] = "0.0.0.0/0"
+		}
+	}
+	cidr := make([]string, 0)
+	for key := range ipmap {
+		cidr = append(cidr, key)
 	}
 	if !opt.Get().Connect.DisablePodIp {
 		ips = getPodIps(k.Clientset, namespace)
