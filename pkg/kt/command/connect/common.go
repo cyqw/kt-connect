@@ -6,11 +6,13 @@ import (
 	opt "github.com/alibaba/kt-connect/pkg/kt/command/options"
 	"github.com/alibaba/kt-connect/pkg/kt/service/cluster"
 	"github.com/alibaba/kt-connect/pkg/kt/service/dns"
+	"github.com/alibaba/kt-connect/pkg/kt/service/tun"
 	"github.com/alibaba/kt-connect/pkg/kt/transmission"
 	"github.com/alibaba/kt-connect/pkg/kt/util"
 	"github.com/rs/zerolog/log"
 	coreV1 "k8s.io/api/core/v1"
 	"strings"
+	"sync/atomic"
 	"time"
 )
 
@@ -19,7 +21,7 @@ func setupDns(shadowPodName, shadowPodIp string) error {
 		log.Info().Msgf("Setting up dns in hosts mode")
 		dump2HostsNamespaces := ""
 		pos := len(util.DnsModeHosts)
-		if len(opt.Get().Connect.DnsMode) > pos + 1 && opt.Get().Connect.DnsMode[pos:pos+1] == ":" {
+		if len(opt.Get().Connect.DnsMode) > pos+1 && opt.Get().Connect.DnsMode[pos:pos+1] == ":" {
 			dump2HostsNamespaces = opt.Get().Connect.DnsMode[pos+1:]
 		}
 		if err := dumpToHost(dump2HostsNamespaces); err != nil {
@@ -40,20 +42,6 @@ func setupDns(shadowPodName, shadowPodIp string) error {
 		if _, err := transmission.SetupPortForwardToLocal(shadowPodName, common.StandardDnsPort, forwardedPodPort); err != nil {
 			return err
 		}
-
-		dnsPort := util.AlternativeDnsPort
-		if util.IsWindows() {
-			dnsPort = common.StandardDnsPort
-		} else if util.IsMacos() {
-			dnsPort = opt.Get().Connect.DnsPort
-		}
-		// must set up name server before change dns config
-		// otherwise the upstream name server address will be incorrect in linux
-		if err := dns.SetupLocalDns(forwardedPodPort, dnsPort, getDnsOrder(opt.Get().Connect.DnsMode)); err != nil {
-			log.Error().Err(err).Msgf("Failed to setup local dns server")
-			return err
-		}
-		return dns.SetNameServer(fmt.Sprintf("%s:%d", common.Localhost, dnsPort))
 	} else {
 		return fmt.Errorf("invalid dns mode: '%s', supportted mode are %s, %s, %s", opt.Get().Connect.DnsMode,
 			util.DnsModeLocalDns, util.DnsModePodDns, util.DnsModeHosts)
@@ -62,25 +50,33 @@ func setupDns(shadowPodName, shadowPodIp string) error {
 }
 
 func getDnsOrder(dnsMode string) []string {
-	if ! strings.Contains(dnsMode, ":") {
-		return []string{ util.DnsOrderCluster, util.DnsOrderUpstream }
+	if !strings.Contains(dnsMode, ":") {
+		return []string{util.DnsOrderCluster, util.DnsOrderUpstream}
 	}
 	return strings.Split(strings.SplitN(dnsMode, ":", 2)[1], ",")
 }
 
 func watchServicesAndPods(namespace string, svcToIp map[string]string, headlessPods []string, shortDomainOnly bool) {
+	var foundChange atomic.Bool
+	foundChange.Store(false)
 	setupTime := time.Now().Unix()
+	go func() {
+		for {
+			time.Sleep(time.Second * 10)
+			if foundChange.CompareAndSwap(true, false) {
+				updateHostInfo(namespace, shortDomainOnly)
+			}
+		}
+	}()
 	go cluster.Ins().WatchService("", namespace,
 		func(svc *coreV1.Service) {
 			// ignore add service event during watch setup
-			if time.Now().Unix() - setupTime > 3 {
-				svcToIp, headlessPods = getServiceHosts(namespace, shortDomainOnly)
-				_ = dns.DumpHosts(svcToIp, namespace)
+			if time.Now().Unix()-setupTime > 3 {
+				foundChange.Store(true)
 			}
 		},
 		func(svc *coreV1.Service) {
-			svcToIp, headlessPods = getServiceHosts(namespace, shortDomainOnly)
-			_ = dns.DumpHosts(svcToIp, namespace)
+			foundChange.Store(true)
 		}, nil)
 	go cluster.Ins().WatchPod("", namespace, nil, func(pod *coreV1.Pod) {
 		if util.Contains(headlessPods, pod.Name) {
@@ -90,6 +86,13 @@ func watchServicesAndPods(namespace string, svcToIp map[string]string, headlessP
 			_ = dns.DumpHosts(svcToIp, namespace)
 		}
 	}, nil)
+}
+
+func updateHostInfo(namespace string, shortDomainOnly bool) {
+	svcToIp, _ := getServiceHosts(namespace, shortDomainOnly)
+	_ = dns.DumpHosts(svcToIp, namespace)
+	_ = tun.Ins().RestoreRoute()
+	_ = setupTunRoute()
 }
 
 func dumpToHost(targetNamespaces string) error {
@@ -186,7 +189,7 @@ func getEnvs() map[string]string {
 
 func getLabels() map[string]string {
 	labels := map[string]string{
-		util.KtRole:    util.RoleConnectShadow,
+		util.KtRole: util.RoleConnectShadow,
 	}
 	if opt.Get().Global.UseShadowDeployment {
 		labels[util.KtTarget] = util.RandomString(20)
